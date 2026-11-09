@@ -14,7 +14,6 @@ import (
 type TestResult struct {
 	Timestamp string   `json:"timestamp"`
 	Output    string   `json:"output"`
-	Lines     []string `json:"lines"`
 }
 
 type DNSAction struct {
@@ -32,7 +31,7 @@ func main() {
 	http.HandleFunc("/api/dns/remove", handleDNSRemove)
 	http.HandleFunc("/api/dns/list", handleDNSList)
 
-	fmt.Println("Сервер запущен на http://0.0.0.0:8080")
+	fmt.Println("Server started on http://0.0.0.0:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
@@ -44,18 +43,17 @@ func handleTest(w http.ResponseWriter, r *http.Request) {
 
 	cmd := exec.Command("/opt/bin/dpi-detector", "-t", "1", "--batch")
 	output, err := cmd.CombinedOutput()
-	
+
 	result := TestResult{
 		Timestamp: time.Now().Format("2006-01-02 15:04:05"),
 		Output:    string(output),
-		Lines:     strings.Split(string(output), "\n"),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
-	
+
 	if err != nil {
-		log.Printf("Ошибка выполнения теста: %v", err)
+		log.Printf("Test error: %v", err)
 	}
 }
 
@@ -106,7 +104,7 @@ func handleDNSRemove(w http.ResponseWriter, r *http.Request) {
 func handleDNSList(w http.ResponseWriter, r *http.Request) {
 	cmd := exec.Command("/opt/bin/ndmc", "-c", "show ip name-server")
 	output, err := cmd.Output()
-	
+
 	var servers []string
 	if err == nil {
 		scanner := bufio.NewScanner(strings.NewReader(string(output)))
@@ -146,6 +144,7 @@ const indexHTML = `<!DOCTYPE html>
         }
         .container { max-width: 800px; margin: 0 auto; }
         h1 { color: #4a9eff; margin-bottom: 30px; text-align: center; }
+        h2 { color: #4a9eff; margin: 20px 0 15px; }
         .btn {
             display: block;
             width: 100%;
@@ -184,9 +183,31 @@ const indexHTML = `<!DOCTYPE html>
             display: flex;
             justify-content: space-between;
             align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
         }
         .dns-ip { font-family: monospace; font-size: 16px; }
+        .dns-actions { display: flex; gap: 10px; }
+        .dns-actions .btn { width: auto; padding: 10px 20px; margin: 0; font-size: 14px; }
         .loading { text-align: center; padding: 20px; color: #888; }
+        .add-dns {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+            display: flex;
+            gap: 10px;
+        }
+        .add-dns input {
+            flex: 1;
+            padding: 12px;
+            font-size: 16px;
+            border: 1px solid #444;
+            border-radius: 8px;
+            background: #1a1a1a;
+            color: #e0e0e0;
+        }
+        .add-dns .btn { width: auto; padding: 12px 20px; margin: 0; }
     </style>
 </head>
 <body>
@@ -202,7 +223,13 @@ const indexHTML = `<!DOCTYPE html>
             <div class="result-box" id="resultBox"></div>
         </div>
 
-        <h2 style="margin-top: 30px;">Управление DNS серверами</h2>
+        <h2>Управление DNS серверами</h2>
+        
+        <div class="add-dns">
+            <input type="text" id="newDnsIp" placeholder="Например: 1.1.1.1">
+            <button class="btn btn-success" onclick="addDNS()">Добавить</button>
+        </div>
+        
         <button class="btn btn-primary" onclick="loadDNS()">Обновить список DNS</button>
         
         <div class="dns-list" id="dnsList">
@@ -243,21 +270,53 @@ const indexHTML = `<!DOCTYPE html>
                 const response = await fetch('/api/dns/list');
                 const data = await response.json();
                 
-                if (data.servers.length === 0) {
+                if (!data.servers || data.servers.length === 0) {
                     dnsList.innerHTML = '<div class="loading">DNS серверы не найдены</div>';
                     return;
                 }
                 
-                dnsList.innerHTML = data.servers.map(ip => `
-                    <div class="dns-item">
-                        <span class="dns-ip">${ip}</span>
-                        <button class="btn btn-danger" style="width: auto; padding: 10px 20px; margin: 0;" onclick="removeDNS('${ip}')">
-                            Удалить
-                        </button>
-                    </div>
-                `).join('');
+                let html = '';
+                for (let i = 0; i < data.servers.length; i++) {
+                    const ip = data.servers[i];
+                    html += '<div class="dns-item">';
+                    html += '<span class="dns-ip">' + ip + '</span>';
+                    html += '<div class="dns-actions">';
+                    html += '<button class="btn btn-danger" onclick="removeDNS(\'' + ip + '\')">Удалить</button>';
+                    html += '</div>';
+                    html += '</div>';
+                }
+                dnsList.innerHTML = html;
             } catch (error) {
                 dnsList.innerHTML = '<div class="loading">Ошибка загрузки</div>';
+            }
+        }
+
+        async function addDNS() {
+            const input = document.getElementById('newDnsIp');
+            const ip = input.value.trim();
+            
+            if (!ip) {
+                alert('Введите IP адрес DNS сервера');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/dns/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ip: ip })
+                });
+                const data = await response.json();
+                
+                if (data.success) {
+                    alert('DNS сервер ' + ip + ' добавлен');
+                    input.value = '';
+                    loadDNS();
+                } else {
+                    alert('Ошибка: ' + data.output);
+                }
+            } catch (error) {
+                alert('Ошибка: ' + error.message);
             }
         }
 
