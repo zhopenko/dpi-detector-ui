@@ -41,7 +41,7 @@ func handleTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := exec.Command("/opt/bin/dpi-detector", "-t", "1", "--batch")
+	cmd := exec.Command("/opt/bin/dpi-detector", "-t", "1", "--ascii")
 	output, err := cmd.CombinedOutput()
 
 	result := TestResult{
