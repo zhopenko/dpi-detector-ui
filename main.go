@@ -12,8 +12,9 @@ import (
 )
 
 type TestResult struct {
-	Timestamp string   `json:"timestamp"`
-	Output    string   `json:"output"`
+	Timestamp string `json:"timestamp"`
+	Output    string `json:"output"`
+	Error     string `json:"error,omitempty"`
 }
 
 type DNSAction struct {
@@ -31,30 +32,44 @@ func main() {
 	http.HandleFunc("/api/dns/remove", handleDNSRemove)
 	http.HandleFunc("/api/dns/list", handleDNSList)
 
-	fmt.Println("Server started on http://0.0.0.0:8080")
+	log.Println("Server started on http://0.0.0.0:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 func handleTest(w http.ResponseWriter, r *http.Request) {
+	log.Println("DEBUG: /api/test requested, method:", r.Method)
+	
 	if r.Method != http.MethodPost {
+		log.Println("DEBUG: Method not allowed")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	log.Println("DEBUG: Executing /opt/bin/dpi-detector -t 1 --ascii")
 	cmd := exec.Command("/opt/bin/dpi-detector", "-t", "1", "--ascii")
+	cmd.Dir = "/opt/dpi-web" // Явно задаем рабочую директорию
+	
 	output, err := cmd.CombinedOutput()
+	
+	log.Printf("DEBUG: Command finished. err=%v, output_length=%d", err, len(output))
+	if err != nil {
+		log.Printf("DEBUG: Command error output: %s", string(output))
+	}
 
 	result := TestResult{
 		Timestamp: time.Now().Format("2006-01-02 15:04:05"),
 		Output:    string(output),
 	}
+	if err != nil {
+		result.Error = err.Error()
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
-
-	if err != nil {
-		log.Printf("Test error: %v", err)
+	errEncode := json.NewEncoder(w).Encode(result)
+	if errEncode != nil {
+		log.Printf("DEBUG: JSON encode error: %v", errEncode)
 	}
+	log.Println("DEBUG: Response sent to client")
 }
 
 func handleDNSAdd(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +146,7 @@ const indexHTML = `<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>DPI Detector - DNS Tests</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -143,8 +158,8 @@ const indexHTML = `<!DOCTYPE html>
             line-height: 1.6;
         }
         .container { max-width: 800px; margin: 0 auto; }
-        h1 { color: #4a9eff; margin-bottom: 30px; text-align: center; }
-        h2 { color: #4a9eff; margin: 20px 0 15px; }
+        h1 { color: #4a9eff; margin-bottom: 30px; text-align: center; font-size: 24px; }
+        h2 { color: #4a9eff; margin: 20px 0 15px; font-size: 20px; }
         .btn {
             display: block;
             width: 100%;
@@ -156,23 +171,25 @@ const indexHTML = `<!DOCTYPE html>
             border-radius: 12px;
             cursor: pointer;
             transition: all 0.3s;
+            -webkit-tap-highlight-color: transparent;
         }
         .btn-primary { background: #4a9eff; color: white; }
-        .btn-primary:hover { background: #3a8eef; }
+        .btn-primary:active { background: #2a7edf; }
         .btn-success { background: #4caf50; color: white; }
         .btn-danger { background: #f44336; color: white; }
         .btn:disabled { opacity: 0.6; cursor: not-allowed; }
         .result-box {
             background: #2a2a2a;
             border-radius: 12px;
-            padding: 20px;
+            padding: 15px;
             margin: 20px 0;
-            max-height: 400px;
+            max-height: 50vh;
             overflow-y: auto;
             font-family: "Courier New", monospace;
-            font-size: 14px;
+            font-size: 13px;
             white-space: pre-wrap;
             word-wrap: break-word;
+            border: 1px solid #3a3a3a;
         }
         .dns-list { margin: 20px 0; }
         .dns-item {
@@ -186,7 +203,7 @@ const indexHTML = `<!DOCTYPE html>
             flex-wrap: wrap;
             gap: 10px;
         }
-        .dns-ip { font-family: monospace; font-size: 16px; }
+        .dns-ip { font-family: monospace; font-size: 16px; word-break: break-all; }
         .dns-actions { display: flex; gap: 10px; }
         .dns-actions .btn { width: auto; padding: 10px 20px; margin: 0; font-size: 14px; }
         .loading { text-align: center; padding: 20px; color: #888; }
@@ -197,9 +214,11 @@ const indexHTML = `<!DOCTYPE html>
             margin: 15px 0;
             display: flex;
             gap: 10px;
+            flex-wrap: wrap;
         }
         .add-dns input {
             flex: 1;
+            min-width: 150px;
             padding: 12px;
             font-size: 16px;
             border: 1px solid #444;
@@ -244,17 +263,24 @@ const indexHTML = `<!DOCTYPE html>
             const resultBox = document.getElementById('resultBox');
             
             btn.disabled = true;
-            btn.textContent = 'Выполняется тест...';
+            btn.textContent = 'Выполняется тест (может занять до 1 мин)...';
             resultDiv.style.display = 'none';
             
             try {
                 const response = await fetch('/api/test', { method: 'POST' });
+                if (!response.ok) {
+                    throw new Error('HTTP error! status: ' + response.status);
+                }
                 const data = await response.json();
                 
-                resultBox.textContent = data.output;
+                if (data.error) {
+                    resultBox.textContent = 'Ошибка сервера: ' + data.error + '\n\nВывод:\n' + data.output;
+                } else {
+                    resultBox.textContent = data.output || 'Тест завершен, но вывод пуст.';
+                }
                 resultDiv.style.display = 'block';
             } catch (error) {
-                resultBox.textContent = 'Ошибка: ' + error.message;
+                resultBox.textContent = 'Ошибка сети или сервера: ' + error.message + '\n\nПроверьте, запущен ли сервер и попробуйте обновить страницу (сбросив кэш).';
                 resultDiv.style.display = 'block';
             } finally {
                 btn.disabled = false;
