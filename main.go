@@ -7,14 +7,25 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
 
 type TestResult struct {
-	Timestamp string `json:"timestamp"`
-	Output    string `json:"output"`
-	Error     string `json:"error,omitempty"`
+	Timestamp string              `json:"timestamp"`
+	Summary   map[string]string   `json:"summary"`
+	Servers   []DNSServer         `json:"servers"`
+	RawOutput string              `json:"raw_output"`
+}
+
+type DNSServer struct {
+	Provider string `json:"provider"`
+	DoH      string `json:"doh"`
+	DoT      string `json:"dot"`
+	UDP      string `json:"udp"`
+	RealUDP  string `json:"real_udp"`
+	Spoofing string `json:"spoofing"`
 }
 
 type DNSAction struct {
@@ -37,39 +48,74 @@ func main() {
 }
 
 func handleTest(w http.ResponseWriter, r *http.Request) {
-	log.Println("DEBUG: /api/test requested, method:", r.Method)
-	
 	if r.Method != http.MethodPost {
-		log.Println("DEBUG: Method not allowed")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	log.Println("DEBUG: Executing /opt/bin/dpi-detector -t 1 --ascii")
+	log.Println("Executing DNS test...")
 	cmd := exec.Command("/opt/bin/dpi-detector", "-t", "1", "--ascii")
-	cmd.Dir = "/opt/dpi-web" // Явно задаем рабочую директорию
+	cmd.Dir = "/opt/dpi-web"
 	
 	output, err := cmd.CombinedOutput()
 	
-	log.Printf("DEBUG: Command finished. err=%v, output_length=%d", err, len(output))
 	if err != nil {
-		log.Printf("DEBUG: Command error output: %s", string(output))
+		log.Printf("Command error: %v", err)
 	}
 
+	// Парсим вывод в структуру
+	result := parseOutput(string(output))
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+	log.Println("Test completed and sent to client")
+}
+
+func parseOutput(output string) TestResult {
 	result := TestResult{
 		Timestamp: time.Now().Format("2006-01-02 15:04:05"),
-		Output:    string(output),
-	}
-	if err != nil {
-		result.Error = err.Error()
+		Summary:   make(map[string]string),
+		RawOutput: output,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	errEncode := json.NewEncoder(w).Encode(result)
-	if errEncode != nil {
-		log.Printf("DEBUG: JSON encode error: %v", errEncode)
+	// Парсим Summary
+	summaryRegex := regexp.MustCompile(`Summary.*?DNS availability\s+(\S+ DoH\s+\S+ DoT\s+\S+ UDP).*?Resolver hijack\s+(.*?)\s+Answer hijack\s+(.*?)\s+─`)
+	if matches := summaryRegex.FindStringSubmatch(output); len(matches) > 3 {
+		result.Summary["availability"] = strings.TrimSpace(matches[1])
+		result.Summary["resolver_hijack"] = strings.TrimSpace(matches[2])
+		result.Summary["answer_hijack"] = strings.TrimSpace(matches[3])
 	}
-	log.Println("DEBUG: Response sent to client")
+
+	// Парсим таблицу результатов DNS
+	lines := strings.Split(output, "\n")
+	inTable := false
+	for _, line := range lines {
+		if strings.Contains(line, "Provider") && strings.Contains(line, "DoH") && strings.Contains(line, "Spoofing") {
+			inTable = true
+			continue
+		}
+		if inTable && strings.HasPrefix(line, "└") {
+			break
+		}
+		if inTable && strings.HasPrefix(line, "│") && !strings.Contains(line, "╞") {
+			parts := strings.Split(line, "│")
+			if len(parts) >= 7 {
+				server := DNSServer{
+					Provider: strings.TrimSpace(parts[1]),
+					DoH:      strings.TrimSpace(parts[2]),
+					DoT:      strings.TrimSpace(parts[3]),
+					UDP:      strings.TrimSpace(parts[4]),
+					RealUDP:  strings.TrimSpace(parts[5]),
+					Spoofing: strings.TrimSpace(parts[6]),
+				}
+				if server.Provider != "" && server.Provider != "Provider" {
+					result.Servers = append(result.Servers, server)
+				}
+			}
+		}
+	}
+
+	return result
 }
 
 func handleDNSAdd(w http.ResponseWriter, r *http.Request) {
@@ -147,6 +193,8 @@ const indexHTML = `<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>DPI Detector - DNS Tests</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -154,23 +202,33 @@ const indexHTML = `<!DOCTYPE html>
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             background: #1a1a1a;
             color: #e0e0e0;
-            padding: 20px;
-            line-height: 1.6;
+            padding: 15px;
+            line-height: 1.5;
+            -webkit-text-size-adjust: 100%;
         }
-        .container { max-width: 800px; margin: 0 auto; }
-        h1 { color: #4a9eff; margin-bottom: 30px; text-align: center; font-size: 24px; }
-        h2 { color: #4a9eff; margin: 20px 0 15px; font-size: 20px; }
+        .container { max-width: 100%; margin: 0 auto; }
+        h1 { 
+            color: #4a9eff; 
+            margin-bottom: 20px; 
+            text-align: center; 
+            font-size: 22px;
+        }
+        h2 { 
+            color: #4a9eff; 
+            margin: 20px 0 12px; 
+            font-size: 18px;
+        }
         .btn {
             display: block;
             width: 100%;
-            padding: 18px;
-            margin: 15px 0;
-            font-size: 18px;
+            padding: 16px;
+            margin: 10px 0;
+            font-size: 16px;
             font-weight: 600;
             border: none;
-            border-radius: 12px;
+            border-radius: 10px;
             cursor: pointer;
-            transition: all 0.3s;
+            transition: all 0.2s;
             -webkit-tap-highlight-color: transparent;
         }
         .btn-primary { background: #4a9eff; color: white; }
@@ -178,24 +236,67 @@ const indexHTML = `<!DOCTYPE html>
         .btn-success { background: #4caf50; color: white; }
         .btn-danger { background: #f44336; color: white; }
         .btn:disabled { opacity: 0.6; cursor: not-allowed; }
-        .result-box {
+        
+        .summary-box {
             background: #2a2a2a;
-            border-radius: 12px;
+            border-radius: 10px;
             padding: 15px;
-            margin: 20px 0;
-            max-height: 50vh;
-            overflow-y: auto;
-            font-family: "Courier New", monospace;
-            font-size: 13px;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            border: 1px solid #3a3a3a;
+            margin: 15px 0;
+            border-left: 4px solid #4a9eff;
         }
-        .dns-list { margin: 20px 0; }
+        .summary-item {
+            margin: 8px 0;
+            font-size: 14px;
+        }
+        .summary-label {
+            color: #888;
+            display: inline-block;
+            min-width: 140px;
+        }
+        .summary-value {
+            color: #4a9eff;
+            font-weight: 600;
+        }
+        
+        .table-container {
+            overflow-x: auto;
+            margin: 15px 0;
+            border-radius: 10px;
+            background: #2a2a2a;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        th {
+            background: #3a3a3a;
+            padding: 10px 8px;
+            text-align: left;
+            font-weight: 600;
+            color: #4a9eff;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        td {
+            padding: 8px;
+            border-top: 1px solid #3a3a3a;
+            word-break: break-word;
+        }
+        tr:hover { background: #333; }
+        
+        .status-ok { color: #4caf50; font-weight: 600; }
+        .status-timeout { color: #ff9800; }
+        .status-error { color: #f44336; }
+        .status-blocked { color: #f44336; font-weight: 600; }
+        .status-spoofed { color: #ff9800; font-weight: 600; }
+        
+        .dns-list { margin: 15px 0; }
         .dns-item {
             background: #2a2a2a;
-            padding: 15px;
-            margin: 10px 0;
+            padding: 12px;
+            margin: 8px 0;
             border-radius: 8px;
             display: flex;
             justify-content: space-between;
@@ -203,30 +304,73 @@ const indexHTML = `<!DOCTYPE html>
             flex-wrap: wrap;
             gap: 10px;
         }
-        .dns-ip { font-family: monospace; font-size: 16px; word-break: break-all; }
-        .dns-actions { display: flex; gap: 10px; }
-        .dns-actions .btn { width: auto; padding: 10px 20px; margin: 0; font-size: 14px; }
+        .dns-ip { 
+            font-family: monospace; 
+            font-size: 15px; 
+            word-break: break-all;
+            flex: 1;
+        }
+        .dns-actions { display: flex; gap: 8px; }
+        .dns-actions .btn { 
+            width: auto; 
+            padding: 8px 16px; 
+            margin: 0; 
+            font-size: 14px;
+        }
         .loading { text-align: center; padding: 20px; color: #888; }
         .add-dns {
             background: #2a2a2a;
-            padding: 15px;
+            padding: 12px;
             border-radius: 8px;
-            margin: 15px 0;
+            margin: 12px 0;
             display: flex;
-            gap: 10px;
+            gap: 8px;
             flex-wrap: wrap;
         }
         .add-dns input {
             flex: 1;
             min-width: 150px;
-            padding: 12px;
-            font-size: 16px;
+            padding: 10px;
+            font-size: 15px;
             border: 1px solid #444;
             border-radius: 8px;
             background: #1a1a1a;
             color: #e0e0e0;
         }
-        .add-dns .btn { width: auto; padding: 12px 20px; margin: 0; }
+        .add-dns .btn { 
+            width: auto; 
+            padding: 10px 18px; 
+            margin: 0;
+        }
+        
+        .raw-toggle {
+            margin: 15px 0;
+        }
+        .raw-toggle summary {
+            cursor: pointer;
+            padding: 10px;
+            background: #2a2a2a;
+            border-radius: 8px;
+            color: #4a9eff;
+            font-weight: 600;
+        }
+        .raw-box {
+            background: #1a1a1a;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 10px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        
+        @media (max-width: 600px) {
+            table { font-size: 11px; }
+            th, td { padding: 6px 4px; }
+        }
     </style>
 </head>
 <body>
@@ -238,11 +382,33 @@ const indexHTML = `<!DOCTYPE html>
         </button>
         
         <div id="testResult" style="display: none;">
-            <h2>Результаты теста:</h2>
-            <div class="result-box" id="resultBox"></div>
+            <h2>📊 Сводка</h2>
+            <div class="summary-box" id="summaryBox"></div>
+            
+            <h2>📋 Результаты по DNS серверам</h2>
+            <div class="table-container">
+                <table id="resultsTable">
+                    <thead>
+                        <tr>
+                            <th>Провайдер</th>
+                            <th>DoH</th>
+                            <th>DoT</th>
+                            <th>UDP</th>
+                            <th>Real UDP</th>
+                            <th>Spoofing</th>
+                        </tr>
+                    </thead>
+                    <tbody id="resultsBody"></tbody>
+                </table>
+            </div>
+            
+            <details class="raw-toggle">
+                <summary>Показать сырой вывод</summary>
+                <div class="raw-box" id="rawOutput"></div>
+            </details>
         </div>
 
-        <h2>Управление DNS серверами</h2>
+        <h2>⚙️ Управление DNS серверами</h2>
         
         <div class="add-dns">
             <input type="text" id="newDnsIp" placeholder="Например: 1.1.1.1">
@@ -257,31 +423,75 @@ const indexHTML = `<!DOCTYPE html>
     </div>
 
     <script>
+        function formatStatus(value) {
+            if (!value || value === '-') return '<span style="color: #666;">-</span>';
+            if (value.includes('TIMEOUT') || value.includes('SYN DROP') || value.includes('TLS DROP')) 
+                return '<span class="status-timeout">' + value + '</span>';
+            if (value.includes('BLOCKED') || value.includes('RST') || value.includes('UNKNOWN')) 
+                return '<span class="status-error">' + value + '</span>';
+            if (value.match(/^\d+\.?\d*ms$/)) 
+                return '<span class="status-ok">' + value + '</span>';
+            if (value.match(/^\d+\/\d+/)) {
+                const match = value.match(/^(\d+)\/(\d+)/);
+                if (match && parseInt(match[1]) > 0) 
+                    return '<span class="status-spoofed">' + value + '</span>';
+            }
+            return value;
+        }
+
         async function runTest() {
             const btn = document.getElementById('testBtn');
             const resultDiv = document.getElementById('testResult');
-            const resultBox = document.getElementById('resultBox');
+            const summaryBox = document.getElementById('summaryBox');
+            const resultsBody = document.getElementById('resultsBody');
+            const rawOutput = document.getElementById('rawOutput');
             
             btn.disabled = true;
             btn.textContent = 'Выполняется тест (может занять до 1 мин)...';
             resultDiv.style.display = 'none';
             
             try {
-                const response = await fetch('/api/test', { method: 'POST' });
+                const response = await fetch('/api/test', { 
+                    method: 'POST',
+                    headers: { 'Cache-Control': 'no-cache' }
+                });
                 if (!response.ok) {
                     throw new Error('HTTP error! status: ' + response.status);
                 }
                 const data = await response.json();
                 
-                if (data.error) {
-                    resultBox.textContent = 'Ошибка сервера: ' + data.error + '\n\nВывод:\n' + data.output;
-                } else {
-                    resultBox.textContent = data.output || 'Тест завершен, но вывод пуст.';
+                // Отображаем сводку
+                let summaryHTML = '';
+                if (data.summary) {
+                    for (const [key, value] of Object.entries(data.summary)) {
+                        const label = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                        summaryHTML += '<div class="summary-item"><span class="summary-label">' + label + ':</span> <span class="summary-value">' + value + '</span></div>';
+                    }
                 }
+                summaryBox.innerHTML = summaryHTML || '<div class="loading">Сводка недоступна</div>';
+                
+                // Отображаем таблицу результатов
+                let tableHTML = '';
+                if (data.servers && data.servers.length > 0) {
+                    for (const server of data.servers) {
+                        tableHTML += '<tr>';
+                        tableHTML += '<td>' + (server.provider || '-') + '</td>';
+                        tableHTML += '<td>' + formatStatus(server.doh) + '</td>';
+                        tableHTML += '<td>' + formatStatus(server.dot) + '</td>';
+                        tableHTML += '<td>' + formatStatus(server.udp) + '</td>';
+                        tableHTML += '<td>' + (server.real_udp || '-') + '</td>';
+                        tableHTML += '<td>' + formatStatus(server.spoofing) + '</td>';
+                        tableHTML += '</tr>';
+                    }
+                }
+                resultsBody.innerHTML = tableHTML || '<tr><td colspan="6" class="loading">Нет данных</td></tr>';
+                
+                // Сырой вывод
+                rawOutput.textContent = data.raw_output || 'Вывод пуст';
+                
                 resultDiv.style.display = 'block';
             } catch (error) {
-                resultBox.textContent = 'Ошибка сети или сервера: ' + error.message + '\n\nПроверьте, запущен ли сервер и попробуйте обновить страницу (сбросив кэш).';
-                resultDiv.style.display = 'block';
+                alert('Ошибка: ' + error.message);
             } finally {
                 btn.disabled = false;
                 btn.textContent = 'Запустить тест DNS';
