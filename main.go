@@ -20,40 +20,40 @@ type TestEndpoints struct {
 }
 
 type DNSServer struct {
-	Provider string       `json:"provider"`
-	DoH      string       `json:"doh"`
-	DoT      string       `json:"dot"`
-	UDP      string       `json:"udp"`
-	RealUDP  string       `json:"real_udp"`
-	Spoofing string       `json:"spoofing"`
-	IP       string       `json:"ip"`
+	Provider  string        `json:"provider"`
+	DoH       string        `json:"doh"`
+	DoT       string        `json:"dot"`
+	UDP       string        `json:"udp"`
+	RealUDP   string        `json:"real_udp"`
+	Spoofing  string        `json:"spoofing"`
+	IP        string        `json:"ip"`
 	Endpoints TestEndpoints `json:"endpoints"`
-	InNDMS   bool         `json:"in_ndms"`
+	InNDMS    bool          `json:"in_ndms"`
 }
 
 type TestResult struct {
-	Timestamp string      `json:"timestamp"`
+	Timestamp string            `json:"timestamp"`
 	Summary   map[string]string `json:"summary"`
-	Servers   []DNSServer `json:"servers"`
-	RawOutput string      `json:"raw_output"`
+	Servers   []DNSServer       `json:"servers"`
+	RawOutput string            `json:"raw_output"`
 }
 
 type TestStatus struct {
-	Status string      `json:"status"` // "running" or "done"
+	Status string      `json:"status"`
 	Result *TestResult `json:"result,omitempty"`
 }
 
 type DNSAction struct {
 	IP       string `json:"ip"`
 	Provider string `json:"provider"`
-	Type     string `json:"type"` // "doh", "dot", "udp"
+	Type     string `json:"type"`
 	Endpoint string `json:"endpoint"`
 }
 
 var (
-	currentTest     *TestResult
-	testMutex       sync.Mutex
-	testRunning     bool
+	currentTest *TestResult
+	testMutex   sync.Mutex
+	testRunning bool
 )
 
 func main() {
@@ -104,19 +104,19 @@ func runTest() {
 	log.Println("Executing DNS test...")
 	cmd := exec.Command("/opt/bin/dpi-detector", "-t", "1", "--ascii")
 	cmd.Dir = "/opt/dpi-web"
-	
+
 	output, err := cmd.CombinedOutput()
-	
+
 	if err != nil {
 		log.Printf("Command error: %v", err)
 	}
 
 	result := parseOutput(string(output))
-	
+
 	testMutex.Lock()
 	currentTest = &result
 	testMutex.Unlock()
-	
+
 	log.Println("Test completed")
 }
 
@@ -145,9 +145,8 @@ func parseOutput(output string) TestResult {
 		RawOutput: output,
 	}
 
-	// Парсим Summary
 	lines := strings.Split(output, "\n")
-	for i, line := range lines {
+	for _, line := range lines {
 		if strings.Contains(line, "DNS availability") {
 			parts := strings.Split(line, "DNS availability")
 			if len(parts) > 1 {
@@ -166,16 +165,13 @@ func parseOutput(output string) TestResult {
 				result.Summary["Перехват ответов"] = strings.TrimSpace(strings.Trim(parts[1], "─│ "))
 			}
 		}
-		_ = i
 	}
 
-	// Парсим таблицы endpoints (DoH, DoT, UDP)
 	endpoints := make(map[string]*TestEndpoints)
 	parseEndpointsTable(output, "DoH endpoints", "DoH", endpoints)
 	parseEndpointsTable(output, "DoT endpoints", "DoT", endpoints)
 	parseEndpointsTable(output, "UDP endpoints", "UDP", endpoints)
 
-	// Парсим основную таблицу результатов
 	inTable := false
 	for _, line := range lines {
 		if strings.Contains(line, "Provider") && strings.Contains(line, "DoH") && strings.Contains(line, "Spoofing") {
@@ -198,18 +194,16 @@ func parseOutput(output string) TestResult {
 						RealUDP:  strings.TrimSpace(parts[5]),
 						Spoofing: strings.TrimSpace(parts[6]),
 					}
-					
-					// Извлекаем IP из Real UDP resolver
+
 					ipRegex := regexp.MustCompile(`(\d+\.\d+\.\d+\.\d+)`)
 					if matches := ipRegex.FindStringSubmatch(server.RealUDP); len(matches) > 1 {
 						server.IP = matches[1]
 					}
-					
-					// Добавляем endpoints для этого провайдера
+
 					if ep, ok := endpoints[provider]; ok {
 						server.Endpoints = *ep
 					}
-					
+
 					result.Servers = append(result.Servers, server)
 				}
 			}
@@ -222,7 +216,7 @@ func parseOutput(output string) TestResult {
 func parseEndpointsTable(output, tableTitle, endpointType string, endpoints map[string]*TestEndpoints) {
 	lines := strings.Split(output, "\n")
 	inTable := false
-	
+
 	for _, line := range lines {
 		if strings.Contains(line, tableTitle) {
 			inTable = true
@@ -236,12 +230,12 @@ func parseEndpointsTable(output, tableTitle, endpointType string, endpoints map[
 			if len(parts) >= 3 {
 				provider := strings.TrimSpace(parts[1])
 				endpoint := strings.TrimSpace(parts[2])
-				
+
 				if provider != "" && provider != "Provider" && endpoint != "" {
 					if _, ok := endpoints[provider]; !ok {
 						endpoints[provider] = &TestEndpoints{}
 					}
-					
+
 					switch endpointType {
 					case "DoH":
 						endpoints[provider].DoH = append(endpoints[provider].DoH, endpoint)
@@ -264,29 +258,35 @@ func handleDNSAdd(w http.ResponseWriter, r *http.Request) {
 
 	var action DNSAction
 	if err := json.NewDecoder(r.Body).Decode(&action); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		log.Printf("JSON decode error: %v", err)
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	log.Printf("Adding DNS: provider=%s, type=%s, endpoint=%s, ip=%s", action.Provider, action.Type, action.Endpoint, action.IP)
 
 	var cmd *exec.Cmd
 	switch action.Type {
 	case "doh":
-		cmd = exec.Command("/opt/bin/ndmc", "-c", fmt.Sprintf("ip name-server %s", action.Endpoint), "-c", "system configuration save")
+		cmd = exec.Command("ndmc", "-c", fmt.Sprintf("ip name-server %s", action.Endpoint), "-c", "system configuration save")
 	case "dot":
-		cmd = exec.Command("/opt/bin/ndmc", "-c", fmt.Sprintf("ip name-server %s", action.Endpoint), "-c", "system configuration save")
+		cmd = exec.Command("ndmc", "-c", fmt.Sprintf("ip name-server %s", action.Endpoint), "-c", "system configuration save")
 	case "udp":
-		cmd = exec.Command("/opt/bin/ndmc", "-c", fmt.Sprintf("ip name-server %s", action.IP), "-c", "system configuration save")
+		cmd = exec.Command("ndmc", "-c", fmt.Sprintf("ip name-server %s", action.IP), "-c", "system configuration save")
 	default:
-		http.Error(w, "Invalid type", http.StatusBadRequest)
+		log.Printf("Invalid type: %s", action.Type)
+		http.Error(w, "Invalid type: "+action.Type, http.StatusBadRequest)
 		return
 	}
 
 	output, err := cmd.CombinedOutput()
+	log.Printf("ndmc output: %s, error: %v", string(output), err)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": err == nil,
 		"output":  string(output),
+		"error":   err.Error(),
 	})
 }
 
@@ -298,39 +298,58 @@ func handleDNSRemove(w http.ResponseWriter, r *http.Request) {
 
 	var action DNSAction
 	if err := json.NewDecoder(r.Body).Decode(&action); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		log.Printf("JSON decode error: %v", err)
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	cmd := exec.Command("/opt/bin/ndmc", "-c", fmt.Sprintf("no ip name-server %s", action.IP), "-c", "system configuration save")
+	log.Printf("Removing DNS: ip=%s, provider=%s", action.IP, action.Provider)
+
+	cmd := exec.Command("ndmc", "-c", fmt.Sprintf("no ip name-server %s", action.IP), "-c", "system configuration save")
 	output, err := cmd.CombinedOutput()
+	log.Printf("ndmc output: %s, error: %v", string(output), err)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": err == nil,
 		"output":  string(output),
+		"error":   err.Error(),
 	})
 }
 
 func handleDNSList(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("/opt/bin/ndmc", "-c", "show ip name-server")
+	cmd := exec.Command("ndmc", "-c", "show ip name-server")
 	output, err := cmd.Output()
+
+	log.Printf("Getting DNS list, error: %v", err)
 
 	var servers []string
 	if err == nil {
 		scanner := bufio.NewScanner(strings.NewReader(string(output)))
+		inServer := false
 		for scanner.Scan() {
 			line := scanner.Text()
-			if strings.Contains(line, "name-server") {
-				parts := strings.Fields(line)
-				for _, p := range parts {
-					if strings.Contains(p, ".") && !strings.Contains(p, ":") {
-						servers = append(servers, p)
+			trimmed := strings.TrimSpace(line)
+			
+			if strings.HasPrefix(trimmed, "server:") {
+				inServer = true
+				continue
+			}
+			
+			if inServer && strings.HasPrefix(trimmed, "address:") {
+				parts := strings.Fields(trimmed)
+				if len(parts) >= 2 {
+					ip := parts[1]
+					if strings.Contains(ip, ".") {
+						servers = append(servers, ip)
 					}
 				}
+				inServer = false
 			}
 		}
 	}
+
+	log.Printf("Found DNS servers: %v", servers)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -344,7 +363,7 @@ const indexHTML = `<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <title>DPI Detector - DNS Tests</title>
+    <title>DPI Detector UI</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -491,7 +510,7 @@ const indexHTML = `<!DOCTYPE html>
 </head>
 <body>
     <div class="container">
-        <h1>🔍 DPI Detector - DNS Tests</h1>
+        <h1>🔍 DPI Detector UI</h1>
         
         <button class="btn btn-primary btn-block" id="testBtn" onclick="startTest()">
             Запустить тест DNS
@@ -594,21 +613,21 @@ const indexHTML = `<!DOCTYPE html>
         async function displayResults(data) {
             currentServers = data.servers || [];
             
-            // Загружаем список DNS из NDMS
             try {
                 const response = await fetch('/api/dns/list');
                 const dnsData = await response.json();
                 ndmsServers = dnsData.servers || [];
+                console.log('NDMS servers:', ndmsServers);
             } catch (error) {
+                console.error('Error loading DNS list:', error);
                 ndmsServers = [];
             }
             
-            // Помечаем серверы, которые уже в NDMS
             currentServers.forEach(server => {
-                server.in_ndms = ndmsServers.includes(server.ip);
+                server.in_ndms = server.ip && ndmsServers.includes(server.ip);
+                console.log('Server:', server.provider, 'IP:', server.ip, 'In NDMS:', server.in_ndms);
             });
             
-            // Отображаем сводку
             const summaryBox = document.getElementById('summaryBox');
             let summaryHTML = '';
             if (data.summary) {
@@ -618,7 +637,6 @@ const indexHTML = `<!DOCTYPE html>
             }
             summaryBox.innerHTML = summaryHTML || '<div class="loading">Сводка недоступна</div>';
             
-            // Отображаем таблицу
             const resultsBody = document.getElementById('resultsBody');
             let tableHTML = '';
             
@@ -715,7 +733,7 @@ const indexHTML = `<!DOCTYPE html>
                     closeModal();
                     startTest();
                 } else {
-                    alert('Ошибка: ' + data.output);
+                    alert('Ошибка: ' + (data.error || data.output || 'Неизвестная ошибка'));
                 }
             } catch (error) {
                 alert('Ошибка: ' + error.message);
@@ -737,7 +755,7 @@ const indexHTML = `<!DOCTYPE html>
                     alert('DNS сервер удален');
                     startTest();
                 } else {
-                    alert('Ошибка: ' + data.output);
+                    alert('Ошибка: ' + (data.error || data.output || 'Неизвестная ошибка'));
                 }
             } catch (error) {
                 alert('Ошибка: ' + error.message);
